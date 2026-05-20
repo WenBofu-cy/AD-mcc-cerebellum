@@ -276,6 +276,29 @@ class MotionBoundaryGate:
         elif command.command_type == CommandType.SPEED:
             self._validate_speed(command, current_speed, block_reasons, exceeded_params, suggested_corrections)
 
+        # 紧急模式宽容处理（S-03）
+        if block_reasons and self.state == GateState.EMERGENCY_GATE:
+            physical_limit_reasons = [
+                r for r in block_reasons
+                if "绝对物理极限" in r or "系统熔断" in r
+            ]
+            if not physical_limit_reasons:
+                # 仅有模式边界超限，放行但附带告警
+                self._log_event("EMERGENCY_OVERRIDE", {
+                    "block_reasons": block_reasons,
+                    "action": "紧急模式宽容放行"
+                })
+                return GatePassSignal(original_command=command, passed=True)
+            else:
+                # 保留绝对物理极限拦截
+                return GateBlockSignal(
+                    original_command=command,
+                    block_reasons=physical_limit_reasons,
+                    exceeded_params=exceeded_params,
+                    current_boundaries=self._current_boundaries,
+                    suggested_corrections=suggested_corrections
+                )
+
         if block_reasons:
             return GateBlockSignal(
                 original_command=command,
@@ -451,6 +474,19 @@ def demo_main():
     print(f"  当前状态: {gate.state.value}")
     print(f"  当前边界: {gate.get_current_boundaries()}")
 
+    print_separator("STEP 4: 紧急模式宽容放行（仅超模式边界，未超物理极限）")
+    gate.switch_mode(ExecutionMode.DEGRADED_LEVEL3)
+    cmd3 = CommandToValidate(
+        command_type=CommandType.ACCELERATION,
+        target_value=2.0,
+        mode_mark=ExecutionMode.DEGRADED_LEVEL3
+    )
+    result3 = gate.validate_command(cmd3)
+    if isinstance(result3, GatePassSignal):
+        print(f"  紧急模式放行（附带告警），校验通过")
+    elif isinstance(result3, GateBlockSignal):
+        print(f"  拦截原因: {result3.block_reasons}")
+
     print("\n✅ 运动生理边界闸门演示完成")
 
 
@@ -532,6 +568,23 @@ if __name__ == "__main__":
             result = gate.validate_command(cmd)
             assert isinstance(result, GateBlockSignal)
             assert "系统熔断" in result.block_reasons
+            print("   ✅ PASS")
+            passed += 1
+        except Exception as e:
+            print(f"   ❌ FAIL: {e}")
+            failed += 1
+
+        # TC-M02-06: 紧急模式宽容放行（仅超模式边界，未超物理极限）
+        print("\n[TC-M02-06] 紧急模式超模式边界但未超物理极限 → 放行")
+        try:
+            gate = MotionBoundaryGate()
+            gate.set_friction_query(lambda: 0.8)
+            gate.switch_mode(ExecutionMode.DEGRADED_LEVEL3)
+            # 加速2.0m/s²超了紧急模式边界1.5，但未超物理极限3.0
+            cmd = CommandToValidate(command_type=CommandType.ACCELERATION, target_value=2.0,
+                                   mode_mark=ExecutionMode.DEGRADED_LEVEL3)
+            result = gate.validate_command(cmd)
+            assert isinstance(result, GatePassSignal), f"预期放行，实际{type(result).__name__}"
             print("   ✅ PASS")
             passed += 1
         except Exception as e:
