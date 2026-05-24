@@ -111,12 +111,21 @@ class TorqueReduction:
 
 
 @dataclass
+class YawControlStatus:
+    state: str = "normal_monitor"
+    brake_request_active: bool = False
+    torque_request_active: bool = False
+
+
+@dataclass
 class ProtectionStatus:
     state: ProtectionLevel = ProtectionLevel.NORMAL_MONITOR
     lateral_accel: float = 0.0
     roll_angle: float = 0.0
     safety_margin_pct: float = 100.0
     current_speed_limit: float = 120.0
+    brake_pressure: float = 0.0
+    torque_reduction: float = 0.0
 
 
 CONTROL_PERIOD_S = 0.005
@@ -135,13 +144,14 @@ class RolloverProtectionController:
         self._actuator_limits = ActuatorLimits()
         self._last_report_time = 0.0
         self._pending_logs: List[Dict[str, Any]] = []
+        self._protection_active = False
 
-        # 回调注入
         self._query_attitude = None
         self._query_roll_risk = None
         self._query_speed = None
         self._query_vehicle_params = None
         self._query_actuator_limits = None
+        self._query_yaw_status = None
 
         self._publish_speed_limit = None
         self._publish_brake = None
@@ -149,6 +159,7 @@ class RolloverProtectionController:
         self._publish_torque_reduction = None
         self._publish_status = None
         self._publish_event_log = None
+        self._publish_yaw_coordination = None
 
         print(f"[{self.module_id}] {self.module_name} {self.version} 初始化完成")
 
@@ -167,6 +178,9 @@ class RolloverProtectionController:
     def set_actuator_limits_query(self, callback):
         self._query_actuator_limits = callback
 
+    def set_yaw_status_query(self, callback):
+        self._query_yaw_status = callback
+
     def set_speed_limit_publisher(self, callback):
         self._publish_speed_limit = callback
 
@@ -184,6 +198,9 @@ class RolloverProtectionController:
 
     def set_event_log_publisher(self, callback):
         self._publish_event_log = callback
+
+    def set_yaw_coordination_publisher(self, callback):
+        self._publish_yaw_coordination = callback
 
     def run_protection_cycle(self):
         now = time.time()
@@ -217,23 +234,29 @@ class RolloverProtectionController:
         else:
             self.state = ProtectionLevel.NORMAL_MONITOR
 
-        # 执行保护动作
+        brake_pressure = 0.0
+        torque_reduction = 0.0
+
         if self.state == ProtectionLevel.LEVEL3_EMERGENCY:
+            brake_pressure = self._actuator_limits.max_brake_pressure_mpa
+            torque_reduction = 0.7
             self._apply_protection(
                 speed_limit=0.0,
-                brake_pressure=self._actuator_limits.max_brake_pressure_mpa,
+                brake_pressure=brake_pressure,
                 lock_steer=True,
                 steer_rate=0.0,
-                torque_reduction=0.7,
+                torque_reduction=torque_reduction,
                 reason="侧翻紧急保护"
             )
         elif self.state == ProtectionLevel.LEVEL2_CRITICAL:
+            brake_pressure = 1.5
+            torque_reduction = 0.3
             self._apply_protection(
                 speed_limit=40.0,
-                brake_pressure=1.5,
+                brake_pressure=brake_pressure,
                 lock_steer=False,
                 steer_rate=150.0,
-                torque_reduction=0.3,
+                torque_reduction=torque_reduction,
                 reason="侧翻临界保护"
             )
         elif self.state == ProtectionLevel.LEVEL1_WARNING:
@@ -248,6 +271,17 @@ class RolloverProtectionController:
         else:
             self._release_all()
 
+        # 横摆协调
+        yaw_status = self._query_yaw_status() if self._query_yaw_status else None
+        if yaw_status and yaw_status.state != "normal_monitor":
+            if self.state in (ProtectionLevel.LEVEL2_CRITICAL, ProtectionLevel.LEVEL3_EMERGENCY):
+                if self._publish_yaw_coordination:
+                    self._publish_yaw_coordination({
+                        "event": "rollover_priority",
+                        "rollover_state": self.state.value,
+                        "action": "degrade_yaw_control"
+                    })
+
         # 状态上报
         if self.state != self._prev_state or (now - self._last_report_time) >= REPORT_INTERVAL_S:
             self._last_report_time = now
@@ -257,6 +291,9 @@ class RolloverProtectionController:
                     lateral_accel=attitude.lateral_accel_ms2,
                     roll_angle=attitude.roll_deg,
                     safety_margin_pct=risk_report.safety_margin_pct if risk_report else 100.0,
+                    current_speed_limit=speed if self.state == ProtectionLevel.LEVEL1_WARNING else (40.0 if self.state == ProtectionLevel.LEVEL2_CRITICAL else 0.0),
+                    brake_pressure=brake_pressure,
+                    torque_reduction=torque_reduction
                 ))
             if self.state != self._prev_state and self._publish_event_log:
                 self._publish_event_log({
@@ -268,6 +305,7 @@ class RolloverProtectionController:
                 })
 
     def _apply_protection(self, speed_limit, brake_pressure, lock_steer, steer_rate, torque_reduction, reason):
+        self._protection_active = True
         if self._publish_speed_limit:
             self._publish_speed_limit(SpeedLimitCommand(
                 target_speed_limit_kmh=speed_limit,
@@ -278,7 +316,7 @@ class RolloverProtectionController:
             self._publish_brake(BrakeIntervention(
                 pressure_mpa=brake_pressure,
                 reason=reason,
-                priority=3,
+                priority=3 if lock_steer else 2,
             ))
         if self._publish_steer_lock:
             self._publish_steer_lock(SteerLockCommand(
@@ -292,7 +330,7 @@ class RolloverProtectionController:
             ))
 
     def _release_all(self):
-        # 释放所有保护动作
+        self._protection_active = False
         if self._publish_brake:
             self._publish_brake(BrakeIntervention(pressure_mpa=0.0, reason="侧翻风险解除"))
         if self._publish_steer_lock:
@@ -301,6 +339,11 @@ class RolloverProtectionController:
             self._publish_torque_reduction(TorqueReduction(reduction_ratio=0.0, reason="侧翻风险解除"))
         if self._publish_speed_limit:
             self._publish_speed_limit(SpeedLimitCommand(target_speed_limit_kmh=250.0, reason="侧翻风险解除", level=0))
+        if self._publish_yaw_coordination:
+            self._publish_yaw_coordination({
+                "event": "rollover_priority_release",
+                "action": "restore_yaw_control"
+            })
 
     def get_state(self) -> ProtectionLevel:
         return self.state
