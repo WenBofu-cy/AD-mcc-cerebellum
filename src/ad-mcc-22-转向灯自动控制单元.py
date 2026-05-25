@@ -139,6 +139,13 @@ class TurnSignalController:
         steering = self._query_steering_angle() if self._query_steering_angle else 0.0
         speed = self._query_speed() if self._query_speed else 0.0
         hazard = self._query_hazard_signal() if self._query_hazard_signal else HazardSignal()
+        intent = self._query_turn_intent() if self._query_turn_intent else None
+
+        # 提前检测紧急避让意图，确保本帧即可覆盖双闪
+        if intent is not None and intent.intent_type == TurnIntentType.EMERGENCY_SWERVE:
+            self._emergency_override = True
+        else:
+            self._emergency_override = False
 
         if hazard.hazard_active and not self._emergency_override:
             if self.state not in (TurnSignalState.HAZARD_OVERRIDE, TurnSignalState.SYSTEM_PAUSED):
@@ -147,8 +154,6 @@ class TurnSignalController:
             return
         elif not hazard.hazard_active and self.state == TurnSignalState.HAZARD_OVERRIDE:
             self.state = TurnSignalState.IDLE_OFF
-
-        intent = self._query_turn_intent() if self._query_turn_intent else None
 
         target_side = None
         is_emergency = False
@@ -160,7 +165,6 @@ class TurnSignalController:
             elif intent.intent_type in (TurnIntentType.RIGHT_TURN, TurnIntentType.RIGHT_LANE_CHANGE):
                 target_side = "right"
             elif intent.intent_type == TurnIntentType.EMERGENCY_SWERVE:
-                # 根据方向盘方向判定紧急避让方向
                 if steering > STEERING_THRESHOLD_DEG:
                     target_side = "right"
                 elif steering < -STEERING_THRESHOLD_DEG:
@@ -378,4 +382,3 @@ if __name__ == "__main__":
         print("=" * 60)
     else:
         demo_main()
-```
