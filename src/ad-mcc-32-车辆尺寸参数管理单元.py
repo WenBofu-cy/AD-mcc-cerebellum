@@ -61,7 +61,7 @@ class ParamQueryRequest:
 @dataclass
 class ParamQueryResponse:
     requester_id: str = ""
-    params: Dict[str, Tuple[float, str, float, bool]] = field(default_factory=dict)  # name: (value, unit, confidence, is_default)
+    params: Dict[str, Tuple[float, str, float, bool]] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
 
 
@@ -182,17 +182,14 @@ class VehicleParamsManager:
         if self.state == ServiceState.UPDATING:
             self._load_calibration()
 
-        # 处理参数更新指令
         update_cmd = self._query_update_command() if self._query_update_command else None
         if update_cmd and self.state == ServiceState.NORMAL_SERVICE:
             self._process_update(update_cmd)
 
-        # 处理查询请求
         while self._pending_queries:
             req = self._pending_queries.pop(0)
             self._respond_to_query(req)
 
-        # 周期性上报（每2秒）
         if getattr(self, '_last_report', 0) == 0 or now - self._last_report >= 2.0:
             self._last_report = now
             self._report_health()
@@ -218,11 +215,11 @@ class VehicleParamsManager:
 
         if missing:
             self._send_fault_alert(f"部分参数使用默认值: {missing}")
-
-        self.state = ServiceState.NORMAL_SERVICE if loaded > 0 else ServiceState.DEGRADED_SERVICE
+            self.state = ServiceState.DEGRADED_SERVICE
+        else:
+            self.state = ServiceState.NORMAL_SERVICE
 
     def _validate_param(self, name: str, value: float) -> bool:
-        # 简单范围校验，可根据需要扩展
         ranges = {
             "wheelbase_m": (2.0, 4.5),
             "track_front_m": (1.2, 2.2),
@@ -267,7 +264,7 @@ class VehicleParamsManager:
                 is_default = self._is_default[name]
                 resp_params[name] = (val, unit, confidence, is_default)
             else:
-                resp_params[name] = (0.0, "", 0.0, True)  # 参数不存在
+                resp_params[name] = (0.0, "", 0.0, True)
 
         if self._publish_query_response:
             self._publish_query_response(ParamQueryResponse(
@@ -317,7 +314,6 @@ def demo_main():
     print("=" * 70)
 
     mgr = VehicleParamsManager()
-    # 模拟标定数据
     mgr.set_calibration_file_query(lambda: VehicleParams(wheelbase_m=2.9, cg_height_m=0.52))
     mgr.set_update_command_query(lambda: None)
 
@@ -427,4 +423,3 @@ if __name__ == "__main__":
         print("=" * 60)
     else:
         demo_main()
-```
