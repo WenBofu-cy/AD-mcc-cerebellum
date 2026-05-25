@@ -201,8 +201,6 @@ class HazardBrakeLightController:
             self._flash_mode = "5Hz闪烁"
             if speed < HAZARD_LOW_SPEED_KMH:
                 self._hazard_active = True
-            elif speed < HAZARD_ACTIVATE_SPEED_KMH:
-                self._hazard_active = True
             else:
                 self._hazard_active = False
         elif self.state == LightControlState.EMERGENCY_BRAKE_FLASH:
@@ -445,4 +443,3 @@ if __name__ == "__main__":
         print("=" * 60)
     else:
         demo_main()
-```
