@@ -205,8 +205,9 @@ class SteeringParamsManager:
 
         if missing:
             self._send_fault_alert(f"部分参数使用默认值: {missing}")
-
-        self.state = ServiceState.NORMAL_SERVICE if loaded > 0 else ServiceState.DEGRADED_SERVICE
+            self.state = ServiceState.DEGRADED_SERVICE
+        else:
+            self.state = ServiceState.NORMAL_SERVICE
 
     def _validate_param(self, name: str, value: float) -> bool:
         if name in PARAM_RANGES:
@@ -401,4 +402,3 @@ if __name__ == "__main__":
         print("=" * 60)
     else:
         demo_main()
-```
